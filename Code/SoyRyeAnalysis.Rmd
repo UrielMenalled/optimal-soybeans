@@ -1,0 +1,1260 @@
+---
+title: "Soy-rye analysis: 2019 project"
+author: "Uriel D. Menalled"
+date: "7/1/2020"
+output: github_document
+editor_options: 
+  chunk_output_type: console
+---
+
+The nlme models were done using the covariate scheme recommended by Pinheiro and Bates (2000). While this approach lead to slightly higher AIC and slightly different p-values than modeling by hand in nlme, parameters of the nls, nlme-by hand, and nlme-covariate models were the same. Furthermore, the nlme-covariate approach was the only method that could properly account for nested random effects. 
+
+# Library
+```{r package loading}
+library(tidyverse)
+library(lmerTest)
+library(openxlsx)
+library(emmeans)
+library(vegan)
+library(goeveg)
+library(labdsv)
+library(nls.multstart)
+library(ggpubr)
+library(corrplot)
+library(nlme)
+library(outliers)
+library(multcomp)
+library(here)
+```
+
+# Weather
+```{r}
+WeatherData<-read.xlsx(here("Data","WeatherData.xlsx"),sheet=1)
+WeatherData$Site<-as.factor(WeatherData$Site)
+WeatherData$Month<-factor(WeatherData$Month,
+                             levels=c("Jan","Feb","Mar","Apr","May","Jun","Jul",
+                                      "Aug","Sep","Oct","Nov","Dec"))
+WeatherData$Year<-factor(WeatherData$Year, levels = c("2019", "15-year avg."))
+WeatherData$Month2<-as.numeric(WeatherData$Month)
+tapply(WeatherData[WeatherData$Month %in% c("May","Jun","Jul","Aug","Sep","Oct"),]$Temp_C,
+      WeatherData[WeatherData$Month %in% c("May","Jun","Jul","Aug","Sep","Oct"),]$Site, summary)
+tapply(WeatherData[WeatherData$Month %in% c("May","Jun","Jul","Aug","Sep","Oct"),]$PPT_cm,
+      WeatherData[WeatherData$Month %in% c("May","Jun","Jul","Aug","Sep","Oct"),]$Site, summary)
+
+WeatherData2<-pivot_longer(WeatherData,col=c(Temp_C,PPT_cm),names_to = "Variable",values_to = "val")
+WeatherData2$Variable<-factor(WeatherData2$Variable,
+                              levels = c("Temp_C","PPT_cm"),
+                              labels = c("Mean temperature","Cumulative monthly precipitation"))
+
+ggplot(WeatherData2[WeatherData2$Month %in% c("May","Jun","Jul","Aug","Sep","Oct"),],aes(x=Month2,y=val,color=Site,lty=Year))+
+  geom_line()+
+  labs(y=expression(atop(paste("Temperature (", degree,"C)"))),
+       x="Month")+
+  scale_y_continuous(sec.axis = sec_axis(~.*1, name = "Precipitation (cm)"))+
+  scale_x_continuous(breaks = 1:12,
+    labels = c("Jan","Feb","Mar","Apr","May","Jun","Jul",
+               "Aug","Sep","Oct","Nov","Dec"))+
+  theme_bw(base_size = 14)+
+  theme(panel.grid.minor = element_blank(),
+        plot.margin=unit(c(1,1,1,1), "cm"),
+        axis.title.y.left = element_text(vjust=-6),
+        axis.title.y.right = element_text(vjust=3))+
+  facet_wrap(~Variable)
+```
+
+
+# Soybeans
+```{r loading in soy biomoss}
+BiomassData<-read.xlsx(here("Data","Soybean_Wt.xlsx"))
+table(BiomassData$Plot,BiomassData$Site) #The missing observation was not repeated
+BiomassData<-BiomassData[,-c(1)]
+
+BiomassData<-BiomassData %>% 
+  mutate(Seeding=ifelse(Site=="Aur" & 
+                            Plot%in% c(1,9,14,17),300,
+                          ifelse(Site=="Aur" & 
+                                 Plot%in% c(2,6,13,19),225,
+                                 ifelse(Site=="Aur" &
+                                          Plot%in% c(4,8,12,20), 150,
+                                        ifelse(Site=="Aur" &
+                                                 Plot%in% c(5,7,15,18), 75,
+                                               ifelse(Site=="Aur" &
+                                                        Plot%in% c(3,10,11,16),0,
+                    ifelse(Site=="Gen" & 
+                             Plot%in% c(4,10,13,16),300,
+                           ifelse(Site=="Gen" &
+                                     Plot%in% c(1,8,14,17),225,
+                                  ifelse(Site=="Gen" &
+                                           Plot%in% c(3,7,15,19),150,
+                                         ifelse(Site=="Gen" &
+                                                  Plot%in% c(2,9,11,20),75,
+                                                0)))))))))) %>%
+  dplyr::select(Site,Block,Plot,Treatment,Seeding,everything()) 
+BiomassData$Treatment<-dplyr::recode(BiomassData$Treatment,High="120",Low="60",None="0")
+BiomassData<-dplyr::rename(BiomassData,Nitrogen=Treatment)
+BiomassData<-dplyr::rename(BiomassData,SoyBiomass='dry_wt.(g)')
+
+BiomassData[c("Site","Block","Seeding")] <- 
+  lapply(BiomassData[c("Site","Block","Seeding")], factor)
+
+BiomassData$Nitrogen<-as.factor(BiomassData$Nitrogen)
+BiomassData$Nitrogen<-factor(BiomassData$Nitrogen,levels = c("0","60","120"))
+
+BiomassData[BiomassData$Site=="Gen",]$Seeding<-
+  dplyr::recode(BiomassData[BiomassData$Site=="Gen",]$Seeding,
+                "150"="75", "75"="150","225"="300","300"="225","0"="0")
+BiomassData$Seeding<-as.factor(BiomassData$Seeding)
+
+ggplot(BiomassData[!BiomassData$Seeding==0,],aes(Seeding,SoyBiomass,fill=Nitrogen))+
+  geom_bar(stat='summary',fun="mean",na.rm=TRUE,position = "dodge")+
+  stat_summary(geom = "errorbar",fun.data = "mean_se",na.rm = TRUE,
+               width=.1,position = position_dodge(.9))+
+  ylab("Total soybean biomass (g/0.5m2)")+
+  scale_fill_grey(start = 0.8, end = 0.4)+
+  theme_bw(base_size = 14)+
+  theme(legend.position = "none")+
+  facet_wrap(~Site)
+
+#Not incluing seeding rate zero
+
+SoyBiomassMod<-lmer(SoyBiomass~Seeding*Nitrogen+(1|Site/Block),
+     data = BiomassData[!BiomassData$Seeding==0,])
+
+plot(SoyBiomassMod)
+hist(resid(SoyBiomassMod))
+anova(SoyBiomassMod)
+
+#Aurora
+  SoyBiomassModAur<-lmer(SoyBiomass~Seeding*Nitrogen+(1|Block),
+       data = BiomassData[BiomassData$Site=="Aur"&!BiomassData$Seeding==0,])
+
+  plot(SoyBiomassModAur)
+  hist(resid(SoyBiomassModAur))
+  anova(SoyBiomassModAur)
+
+#Geneva
+  SoyBiomassModGen<-lmer(SoyBiomass~Seeding*Nitrogen+(1|Block),
+       data = BiomassData[BiomassData$Site=="Gen"&!BiomassData$Seeding==0,])
+
+  plot(SoyBiomassModGen)
+  hist(resid(SoyBiomassModGen))
+  anova(SoyBiomassModGen)
+
+BiomassData2<-BiomassData
+BiomassData2$Seeding<-as.numeric(as.character(BiomassData$Seeding))
+BiomassData2$Site<-dplyr::recode_factor(BiomassData2$Site,"Aur"="Aurora","Gen"="Geneva")
+```
+
+```{r Yeild setup}
+YieldData<-read.xlsx(here("Data","SoyRye_CompleteYieldData.xlsx"))
+unique(YieldData$Treatment)
+YieldData<-YieldData %>% 
+  mutate(Seeding=ifelse(Site=="Aur" & 
+                            Plot%in% c(1,9,14,17),300,
+                          ifelse(Site=="Aur" & 
+                                 Plot%in% c(2,6,13,19),225,
+                                 ifelse(Site=="Aur" &
+                                          Plot%in% c(4,8,12,20), 150,
+                                        ifelse(Site=="Aur" &
+                                                 Plot%in% c(5,7,15,18), 75,
+                                               ifelse(Site=="Aur" &
+                                                        Plot%in% c(3,10,11,16),0,
+                    ifelse(Site=="Gen" & 
+                             Plot%in% c(4,10,13,16),300,
+                           ifelse(Site=="Gen" &
+                                     Plot%in% c(1,8,14,17),225,
+                                  ifelse(Site=="Gen" &
+                                           Plot%in% c(3,7,15,19),150,
+                                         ifelse(Site=="Gen" &
+                                                  Plot%in% c(2,9,11,20),75,
+                                                0)))))))))) %>%
+  dplyr::select(Site,Block,Plot,Treatment,Seeding,everything()) 
+YieldData$Treatment<-dplyr::recode(YieldData$Treatment,High="120",Low="60",None="0")
+YieldData<-dplyr::rename(YieldData,Nitrogen=Treatment)
+
+#YieldData<-YieldData[-67,]
+
+YieldData$Nitrogen<-as.factor(YieldData$Nitrogen)
+YieldData$Nitrogen<-factor(YieldData$Nitrogen,levels = c("0","60","120"))
+
+YieldData[YieldData$Site=="Gen",]$Seeding<-
+  dplyr::recode(YieldData[YieldData$Site=="Gen",]$Seeding,
+                "150"="75", "75"="150","225"="300","300"="225","0"="0")
+YieldData$Seeding<-as.factor(YieldData$Seeding)
+
+YieldData %>% 
+  group_by(Site,Seeding) %>% 
+  summarise(AvgTestWeight=mean(TestWeight_lbsBu,na.rm=T)) %>% 
+  arrange(Site,Seeding)
+
+YieldData2<-YieldData %>% 
+  filter(!Seeding==0) %>% 
+  mutate(AvgSeedWeight_g=SeedWeight_g/Seed_num)
+
+YieldData2$Seeding<-factor(YieldData2$Seeding,
+                           levels=c(0,75,150,225,300))
+```
+##Emergence
+-Make sure yield is loaded first
+-I have confirmed that the conversions to plants/ha are correct.
+```{r Emergence setup and analysis}
+EarlyCounts<-read.xlsx(here("Data","EarlyCounts.xlsx"))
+EarlyCounts$Nitrogen<-dplyr::recode(EarlyCounts$Nitrogen,High="120",Mid="60",Low="0")
+
+CountsV1<-EarlyCounts %>% 
+  mutate(Soy_num=(43560/(30/12)*(Soy_num/3.28084)),
+         Stage="V1")
+CountsV1$Seeding<-as.factor(CountsV1$Seeding)
+CountsV1[CountsV1$Site=="Gen",]$Seeding<-
+  dplyr::recode(CountsV1[CountsV1$Site=="Gen",]$Seeding,
+                "150"="75", "75"="150","225"="300","300"="225","0"="0")
+
+#Don't forget to load Yield data above to get the correction for the R8 dataframe
+CountsR8<-YieldData %>% 
+  dplyr::select(Site, Block, Plot, Nitrogen, Seeding, Soy_num) %>% 
+  mutate(Soy_num=(43560/(30/12)*(Soy_num/3.28084)),
+         Stage="R8")
+
+EmergenceData<-rbind(CountsV1,CountsR8)
+EmergenceData$Stage<-factor(EmergenceData$Stage,levels = c("V1","R8"))
+EmergenceData$Seeding<-factor(EmergenceData$Seeding,
+                              levels = c(0,75,150,225,300))
+
+EmergenceData_Long<-EmergenceData %>% 
+  mutate_if(is.numeric, round,0) %>%
+  mutate(ID=paste(Site,Block,Nitrogen,Seeding,sep = ".")) %>% 
+  pivot_wider(names_from = Stage,
+              values_from = Soy_num)
+
+EmergenceData_Long %>% 
+  group_by(Site,Seeding) %>% 
+  do(tTestMod=t.test(.$V1,.$R8,alternative="two.sided")) %>% 
+  summarise(p_value=tTestMod$p.value)
+
+EmergenceData_Long %>% 
+  group_by(Site,Seeding) %>%
+  summarise(SoyNumV1=mean(V1,na.rm=T),SoyDevV1=sd(V1,na.rm=T),
+            SoyNumR8=mean(R8,na.rm=T),SoyDevR8=sd(R8,na.rm=T),
+            PctChange=((mean(R8,na.rm=T)-mean(V1,na.rm=T))/mean(V1,na.rm=T)*100)) %>% 
+  mutate_if(is.numeric, round,0) %>% 
+  mutate(SoyNumV1=paste(SoyNumV1,paste("(",SoyDevV1,")",sep="")),
+         SoyNumR8=paste(SoyNumR8,paste("(",SoyDevR8,")",sep=""))) %>% 
+  dplyr::select(-c(SoyDevV1,SoyDevR8))
+
+EmergenceData[c("Site","Block","Seeding","Stage")] <- 
+  lapply(EmergenceData[c("Site","Block","Seeding","Stage")], factor)
+EmergenceData$Soy_num<-round(EmergenceData$Soy_num,0)
+
+EmergenceDataTest<-EmergenceData
+EmergenceDataTest$SeedingMetric<-
+  dplyr::recode(EmergenceDataTest$Seeding,
+                "0"="0","75"="185,300","150"="370,700","225"="556,000","300"="741,300")
+EmergenceDataTest<-EmergenceDataTest %>% 
+  mutate(Soy_num_metric=Soy_num*2.47)
+EmergenceDataTest$Nitrogen<-as.factor(EmergenceDataTest$Nitrogen)
+
+EmergenceDataTest2<-EmergenceDataTest[!EmergenceDataTest$Seeding==0,]
+EmergenceDataTest2$Block<-as.numeric(as.character(EmergenceDataTest2$Block))
+EmergenceDataTest2<-EmergenceDataTest2 %>% 
+  mutate(Block=case_when(
+    Site=="Gen" ~ Block+4,
+    TRUE~Block))
+
+EmTest2<-lmer(log(Soy_num_metric)~Site+SeedingMetric*Stage*Nitrogen+
+               (1|Block/SeedingMetric),
+             data = EmergenceDataTest2)
+
+plot(EmTest2)
+anova(EmTest2)
+###
+cld(emmeans(EmTest2, specs = ~SeedingMetric|Stage),
+            sort=F,adjust="none",Letters="abcde")
+pairs(emmeans(EmTest2, specs = ~Stage|SeedingMetric))
+range(EmergenceDataTest[EmergenceDataTest$Stage=="V1",]$Soy_num_metric)
+
+EmergenceDataTest2<-EmergenceDataTest
+EmergenceDataTest2$SeedingMetric<-gsub(",","",EmergenceDataTest2$SeedingMetric)
+EmergenceDataTest2$SeedingMetric<-as.numeric(as.character(EmergenceDataTest2$SeedingMetric))
+
+#tiff("test.tiff", units="in", width=5.82, height=4.10, res=300)
+ggplot(EmergenceDataTest2,aes(SeedingMetric,Soy_num_metric,color=Stage))+
+  geom_smooth(method = "lm",se=F,size=.75)+
+  geom_abline(intercept = 0, slope = .9, color="black", 
+              linetype="dashed", size=.75)+
+  geom_point()+
+  labs(x=expression("Seeding rate (seeds"~ha^-1*')'),
+       y=expression("Soybean density (plants"~ha^-1*')'),
+       fill="Soybean\ngrowth stage")+
+  theme_bw(base_size = 14)+
+  theme(legend.position = "right")+
+  scale_y_continuous(labels = scales::comma)+
+  scale_x_continuous(labels = scales::comma,
+                     breaks=c(0,185300,370700,556000,741300))
+#dev.off()
+
+EmergenceDataTest %>% 
+  filter(Stage=="V1") %>% 
+  group_by(SeedingMetric) %>% 
+  summarize(MeanPlants=mean(Soy_num_metric))
+```
+
+##Yeild
+  
+-Yield calculated at 13% moisture and accounts for sampling method. This was only done for the final metric, SeedWeight_kgha.
+-The full model does not work with nlme()
+```{r Prep}
+EmergenceData2<-EmergenceData[EmergenceData$Stage=="V1",]
+EmergenceData2$Seeding<-as.numeric(as.character(EmergenceData2$Seeding))
+EmergenceData2$Nitrogen<-factor(EmergenceData2$Nitrogen, levels = c("0","60","120"))
+EmergenceData2$Site<-dplyr::recode(EmergenceData2$Site,"Aur"="Aurora","Gen"="Geneva")
+
+YieldData3<-YieldData2
+YieldData3$Site<-factor(YieldData3$Site,levels = c("Aur","Gen"),labels = c("Aurora","Geneva"))
+YieldData3$Seeding<-as.numeric(as.character(YieldData3$Seeding))
+YieldData3$Soy_num<-NULL
+YieldData3$Block<-as.factor(YieldData3$Block)
+YieldData3<-left_join(YieldData3,
+          EmergenceData2[!EmergenceData2$Seeding==0,-which(names(EmergenceData2) %in% c("Stage"))])
+YieldData3<-YieldData3 %>% 
+  mutate(Soy_num_metric=Soy_num*2.47,
+         SeedWeight_kgha=SeedWeight_g*(5.33/.001)*(2.47/1)*(1/1000)*
+           (100/87)) #conversion to kg/ha; last fraction is moisture adju.
+
+YieldData5<-YieldData
+YieldData5<-YieldData5 %>% 
+  mutate(Soy_num=(43560/(30/12)*(Soy_num/3.28084)))
+YieldData5$Site<-factor(YieldData5$Site,levels = c("Aur","Gen"),labels = c("Aurora","Geneva"))
+YieldData5$Seeding<-as.numeric(as.character(YieldData5$Seeding))
+YieldData5$Soy_num<-NULL
+YieldData5$Block<-as.factor(YieldData5$Block)
+YieldData5<-left_join(YieldData5,
+          EmergenceData2[,-which(names(EmergenceData2) %in% c("Stage"))])
+YieldData5<-YieldData5 %>% 
+  mutate(Soy_num_metric=Soy_num*2.47,
+         SeedWeight_kgha=SeedWeight_g*(5.33/.001)*(2.47/1)*(1/1000)*
+           (100/87),#conversion to kg/ha; last fraction is moisture adju.
+         NitrogenMetric=case_when(
+           Nitrogen==0~0,
+           Nitrogen==60~70,
+           Nitrogen==120~135))
+YieldData5$NitrogenMetric<-as.factor(YieldData5$NitrogenMetric)
+```
+
+```{r yield Modeling}
+#asymptotic
+boxplot(YieldData5$SeedWeight_kgha)
+##Reduced
+Asy_Red<-nlme(data=YieldData5,
+    SeedWeight_kgha~a*(1-exp(-exp(b)*Soy_num_metric)),
+    start = c(a=3000,b=-11.8), #I had to change a to get a fit when I re-ran code in 2025
+    fixed= list(a~1,b ~ 1),
+    random = list(Site=pdDiag(list(a~1,b ~ 1)),
+                  Block=pdDiag(list(a~1,b ~ 1))),
+    na.action = na.omit)
+
+##Site
+AsySite_Semi<-nlme(data=YieldData5,
+    SeedWeight_kgha~a*(1-exp(-exp(b)*Soy_num_metric)),
+    start = c(3500,3000,-11.8),
+    fixed= list(a~Site,b ~ 1),
+    random = list(Site=pdDiag(list(a~Site,b ~ 1)),
+                  Block=pdDiag(list(a~Site,b ~ 1))),
+    na.action = na.omit)
+
+#AsySite_Full<-nlme(data=YieldData5,
+#    SeedWeight_kgha~a*(1-exp(-exp(b)*Soy_num_metric)),
+#    start = c(3573.4,3152.2,-11.8,-11.8),
+#    fixed= list(a+b ~ Site),
+#    random = list(Site=pdDiag(list(a ~ Site,b~Site)),
+#                  Block=pdDiag(list(a ~ Site,b~Site))),
+#    na.action = na.omit,
+#    control = list(pnlsTol = 1e-6,msMaxIter=5000))
+
+anova(Asy_Red,AsySite_Semi)
+
+library(sjPlot)
+coef(summary(AsySite_Semi))
+fixef(AsySite_Semi)[1]
+#t.test(fixef(AsySite_Semi)[1]) not sure why this doesn't work
+fun.1YieldSite<- function(x) fixef(Asy_Red)[1]*(1-exp(-exp(fixef(Asy_Red)[2])*x))
+fun.2.1YieldSite<- function(x) fixef(AsySite_Semi)[1]*(1-exp(-exp(fixef(AsySite_Semi)[3])*x))
+fun.2.2YieldSite<- function(x) (fixef(AsySite_Semi)[1]+fixef(AsySite_Semi)[2])*(1-exp(-exp(fixef(AsySite_Semi)[3])*x)) 
+
+
+library(grid)
+#Optimums where used in the publication
+optimize(fun.2.1YieldSite, interval=c(0,741300),maximum = T)
+optimize(fun.2.2YieldSite, interval=c(0,741300),maximum = T)
+
+###Semi-reduced graph-Site
+#tiff("Fig4.tiff", units="in", width=5.82, height=5.54, res=300)
+ggplot(YieldData5,aes(x=Soy_num_metric,y=SeedWeight_kgha))+#,color=Site))+
+    geom_point()+
+    stat_function(fun=fun.1YieldSite,size=1.2)+
+    theme_bw(base_size = 18)+
+    labs(y=expression("Soybean yield (kg"~ha^-1*')'),
+         x=expression("Soybean density (plants"~ha^-1*')'),
+         color="Site")+
+    scale_x_continuous(labels = scales::comma)+
+    scale_color_brewer(palette = "Accent")+
+    theme(legend.position = "bottom")
+#dev.off()
+
+##Nitrogen-FULL DOES NOT WORK
+AsyNitrogen_Semi<-nlme(data=YieldData5,
+    SeedWeight_kgha~a*(1-exp(-exp(b)*Soy_num_metric)),
+    start = c(3500,3000,3000,-11.8),
+    fixed= list(a~Nitrogen,b ~ 1),
+    random = list(Site=pdDiag(list(a~Nitrogen,b ~ 1)),
+                  Block=pdDiag(list(a~Nitrogen,b ~ 1))),
+    na.action = na.omit)
+
+#AsyNitrogen_Full<-nlme(data=YieldData5,
+#    SeedWeight_kgha~a*(1-exp(-exp(b)*Soy_num_metric)),
+#    start = c(3573.4,3152.2,3152.2,-11.8,-11.8,-11.8),
+#    fixed= list(a+b ~ Nitrogen),
+#    random = list(Site=pdDiag(list(a ~ Nitrogen,b~Nitrogen)),
+#                  Block=pdDiag(list(a ~ Nitrogen,b~Nitrogen))),
+#    na.action = na.omit,
+#    control = list(pnlsTol = 1e-6,msMaxIter=5000))
+
+anova(Asy_Red,AsyNitrogen_Semi)
+
+fixef(Asy_Red)
+fixef(AsySite_Semi)
+fixef(AsyNitrogen_Semi)
+```
+
+#Weeds
+```{r setup}
+SR_weedsRaw<-read.xlsx(here("Data","SR_weedsRaw.xlsx"))
+colnames(SR_weedsRaw)[6]<-"Biomass"
+unique(SR_weedsRaw$Treatment)
+summary(as.factor(SR_weedsRaw$Site))
+table(SR_weedsRaw$Plot[SR_weedsRaw$Site=="Gen"],SR_weedsRaw$Treatment[SR_weedsRaw$Site=="Gen"])
+
+SR_weedsRaw<-as.data.frame(
+  pivot_wider(SR_weedsRaw,
+            names_from = Weed,
+            values_from = Biomass,
+            values_fill = list(Biomass=0)))
+
+#SR_weedsWide<-createWorkbook()
+#addWorksheet(SR_weedsWide,"Wide")
+#writeData(SR_weedsWide,"Wide",SR_weedsRaw2,rowNames = T)
+#saveWorkbook(SR_weedsWide,"~/Box/Rye-Soybean 2019/Data/Weeds/SR_weedsWide.xlsx",overwrite = T)
+SR_weedsWide<-read.xlsx(here("Data","SR_weedsWideEdited.xlsx"),sheet = 1)
+
+SR_weedsWide<-SR_weedsWide %>% 
+mutate(Seeding=ifelse(Site=="Aur" & 
+                            Plot%in% c(1,9,14,17),300,
+                          ifelse(Site=="Aur" & 
+                                 Plot%in% c(2,6,13,19),225,
+                                 ifelse(Site=="Aur" &
+                                          Plot%in% c(4,8,12,20), 150,
+                                        ifelse(Site=="Aur" &
+                                                 Plot%in% c(5,7,15,18), 75,
+                                               ifelse(Site=="Aur" &
+                                                        Plot%in% c(3,10,11,16),0,
+                    ifelse(Site=="Gen" & 
+                             Plot%in% c(4,10,13,16),300,
+                           ifelse(Site=="Gen" &
+                                     Plot%in% c(1,8,14,17),225,
+                                  ifelse(Site=="Gen" &
+                                           Plot%in% c(3,7,15,19),150,
+                                         ifelse(Site=="Gen" &
+                                                  Plot%in% c(2,9,11,20),75,
+                                                0)))))))))) %>%
+  dplyr::select(Site,Block,Plot,Treatment,Seeding,everything())
+
+#This is the seeding rate correction for the weeds data. All other analysis stems from this data frame.
+SR_weedsWide[SR_weedsWide$Site=="Gen",]$Seeding<-
+  dplyr::recode(SR_weedsWide[SR_weedsWide$Site=="Gen",]$Seeding,
+         "150"="75", "75"="150","225"="300","300"="225", "0"="0")
+
+SR_weedsKey<-read.xlsx(here("Data","SR_weedsWideEdited.xlsx"),sheet = 2)
+
+SR_weedsLong<-as.data.frame(
+  pivot_longer(SR_weedsWide,
+               -c(Site,Block,Plot,Treatment,Seeding),
+               names_to = "Species",
+               values_to = "Biomass"))
+
+SR_weedsBiomass<-
+  as.data.frame(
+  SR_weedsLong %>%
+    group_by(Site,Block,Plot,Treatment,Seeding) %>%
+    dplyr::select(-Species) %>% 
+    summarise(TotalBiomass=sum(Biomass)))
+SR_weedsBiomass[c("Site","Block","Treatment","Seeding")]<-lapply(SR_weedsBiomass[c("Site","Block","Treatment","Seeding")], factor)
+
+SR_weedsBiomass$Seeding<-factor(SR_weedsBiomass$Seeding,levels = c("0","75","150","225","300"))
+```
+##Biomass
+EmergenceData2 needs to be loaded.
+Two outliers (weeds above 300 kg/ha) were removed for model convergence. 
+```{r biomass modeling}
+#Setup
+SR_weedsBiomass2<-SR_weedsBiomass %>% 
+  group_by(Site,Treatment, Seeding)%>% 
+  mutate(Mean_lbs..ac=TotalBiomass*((.5/0.000123553)*.0022))
+SR_weedsBiomass2$Treatment<-factor(SR_weedsBiomass2$Treatment,
+                                   levels = c("None","Low","High"),
+                                   labels = c("0","60","120"))
+SR_weedsBiomass2<-rename(SR_weedsBiomass2,"Nitrogen"="Treatment")
+
+SR_weedsBiomass3<-SR_weedsBiomass2
+SR_weedsBiomass3$Seeding<-as.numeric(as.character(SR_weedsBiomass3$Seeding))
+SR_weedsBiomass3$Site<-dplyr::recode(SR_weedsBiomass3$Site,"Aur"="Aurora","Gen"="Geneva")
+SR_weedsBiomass3<-
+  left_join(SR_weedsBiomass3,EmergenceData2, by = c("Site", "Block", "Plot",
+                                                    "Nitrogen", "Seeding"))
+BiomassData2<-BiomassData2 %>% 
+  dplyr::select(-c(Plant,'Soy#'))
+SR_weedsBiomass3<-
+  left_join(SR_weedsBiomass3,BiomassData2, by = c("Site", "Block", "Plot",
+                                                  "Nitrogen", "Seeding"))
+
+SR_weedsBiomass3<-SR_weedsBiomass3 %>% 
+  mutate(Soy_num_metric=Soy_num*2.47105,
+         TotalBiomass_metric=TotalBiomass*(2.47105/2.20462),
+         log_TotalBiomass_metric=log(TotalBiomass_metric),
+         sqrt_TotalBiomass_metric=sqrt(TotalBiomass_metric))
+
+SR_weedsBiomass3<-SR_weedsBiomass3 %>% 
+  mutate(NitrogenMetric=case_when(Nitrogen==60~70,
+                                  Nitrogen==120~135,
+                                  TRUE~0))
+#Outliers
+boxplot(SR_weedsBiomass3$TotalBiomass_metric)
+grubbs.test(SR_weedsBiomass3$TotalBiomass_metric)
+
+#Info
+range(SR_weedsBiomass3$TotalBiomass_metric,na.rm = T)
+
+SR_weedsBiomass3 %>% 
+  filter(Seeding==0) %>% 
+  group_by(Nitrogen) %>% 
+  summarise(Mean=mean(TotalBiomass_metric,na.rm=T))
+
+#Site - No effect
+Weed_Red<-
+  nlme(data = SR_weedsBiomass3[SR_weedsBiomass3$TotalBiomass_metric<300,],
+     TotalBiomass_metric~
+       w0/(1+i*Soy_num_metric),
+     start = c(1.793565e+02,4.584e-06),
+     fixed= list(w0~1,i ~ 1),
+     random = list(Site=pdDiag(list(w0~1,i ~ 1)),
+                   Block=pdDiag(list(w0~1,i ~ 1))),
+     na.action = na.omit)
+
+Weed_SemiSite<-
+  nlme(data = SR_weedsBiomass3[SR_weedsBiomass3$TotalBiomass_metric<300,],
+     TotalBiomass_metric~
+       w0/(1+i*Soy_num_metric),
+     start = c(1.793565e+02,1.793565e+02,4.584e-06),
+     fixed= list(w0~Site,i ~ 1),
+     random = list(Site=pdDiag(list(w0~Site,i ~ 1)),
+                   Block=pdDiag(list(w0~Site,i ~ 1))),
+     na.action = na.omit)
+
+Weed_FullSite<-
+  nlme(data = SR_weedsBiomass3[SR_weedsBiomass3$TotalBiomass_metric<300,],
+     TotalBiomass_metric~
+       w0/(1+i*Soy_num_metric),
+     start = c(w0=1.793565e+02,0,0, i=4.584e-06),
+     fixed= list(w0+i ~ Site),
+     random = list(Site=pdDiag(list(w0~Site,i ~ Site)),
+                   Block=pdDiag(list(w0~Site,i ~ Site))),
+     na.action = na.omit)
+
+anova(Weed_Red,Weed_SemiSite)
+anova(Weed_Red,Weed_FullSite)
+anova(Weed_SemiSite,Weed_FullSite)
+
+#Nitrogen effect - semi is best
+Weed_SemiNitrogen<-
+  nlme(data = SR_weedsBiomass3[SR_weedsBiomass3$TotalBiomass_metric<300,],
+     TotalBiomass_metric~
+       w0/(1+i*Soy_num_metric),
+     start = c(1.793565e+02,1.793565e+02,1.793565e+02,4.584e-06),
+     fixed= list(w0~Nitrogen,i ~ 1),
+     random = list(Site=pdDiag(list(w0~Nitrogen,i ~ 1)),
+                   Block=pdDiag(list(w0~Nitrogen,i ~ 1))),
+     na.action = na.omit)
+
+###Estimates for fitting
+TestList<-nlsList(data = SR_weedsBiomass3,
+     TotalBiomass_metric~
+       w0/(1+i*Soy_num_metric)|Nitrogen,
+     start = c(w0=1.793565e+02,i=4.584e-06),
+     na.action = na.omit)
+###
+
+Weed_FullNitrogen<-
+  nlme(data = SR_weedsBiomass3[SR_weedsBiomass3$TotalBiomass_metric<300,],
+     TotalBiomass_metric~
+       w0/(1+i*Soy_num_metric),
+     start = c(coef(TestList)[1,1],coef(TestList)[2,1],coef(TestList)[3,1],
+               coef(TestList)[1,2],coef(TestList)[2,2],coef(TestList)[3,2]),
+     fixed= list(w0+i ~ Nitrogen),
+     random = list(Site=pdDiag(w0+i ~ Nitrogen),
+                   Block=pdDiag(w0+i ~ Nitrogen)),
+     na.action = na.omit)
+
+anova(Weed_Red,Weed_SemiNitrogen)
+anova(Weed_SemiNitrogen,Weed_FullNitrogen)
+anova(Weed_Red,Weed_FullNitrogen)
+
+fixef(Weed_Red)
+fixef(Weed_SemiSite)
+fixef(Weed_SemiNitrogen)
+fixef(Weed_FullSite)
+fixef(Weed_FullNitrogen)
+
+plot(Weed_SemiNitrogen)
+qqnorm(Weed_SemiNitrogen,abline = c(0,1))
+
+WeedModFE<-fixef(Weed_SemiNitrogen)
+fun.1nit<-function(x) WeedModFE[1]*(1/(1+(WeedModFE[4]*x)))
+fun.2nit<-function(x) (WeedModFE[1]+WeedModFE[2])*(1/(1+(WeedModFE[4]*x)))
+fun.3nit<-function(x) (WeedModFE[1]+WeedModFE[3])*(1/(1+(WeedModFE[4]*x)))
+
+#tiff("Fig2.tiff", units="in", width=5.82, height=5.54, res=300)
+#pdf("Fig2.pdf", width=5.82, height=5.54)
+ggplot(SR_weedsBiomass3,
+       aes(x=Soy_num_metric,y=TotalBiomass_metric,color=as.factor(NitrogenMetric)))+
+    geom_point()+
+    stat_function(fun=fun.1nit,size=1.2,aes(color="0"))+
+    stat_function(fun=fun.2nit,size=1.2,aes(color="70"))+
+    stat_function(fun=fun.3nit,size=1.2,aes(color="135"))+
+    theme_bw(base_size = 18)+
+    ylab(expression("Weed biomass (kg"~ha^-1*')'))+
+    xlab(expression("Soybean density (plants"~ha^-1*')'))+
+    labs(color=expression("Nitrogen (kg"~ha^-1*')'))+
+    scale_y_continuous(labels = scales::comma)+
+    scale_x_continuous(labels = scales::comma)+
+    scale_color_brewer(palette = "Accent",labels = c("0", "63", "125"))+
+    theme(plot.title = element_text(hjust = 0.5), 
+          legend.position = "bottom")
+#dev.off()
+
+fun.1RedTest<-function(x) fixef(Weed_Red)[1]*(1/(1+(fixef(Weed_Red)[2]*x)))
+
+#pdf("Fig2Mod.pdf", width=5.82, height=5.54)
+ggplot(SR_weedsBiomass3,
+       aes(x=Soy_num_metric,y=TotalBiomass_metric))+
+    geom_point()+
+    stat_function(fun=fun.1RedTest,size=1.2)+
+    theme_bw(base_size = 18)+
+    ylab(expression("Weed biomass (kg"~ha^-1*')'))+
+    xlab(expression("Soybean density (plants"~ha^-1*')'))+
+    scale_y_continuous(labels = scales::comma)+
+    scale_x_continuous(labels = scales::comma)+
+    theme(plot.title = element_text(hjust = 0.5), 
+          legend.position = "bottom")
+#dev.off()
+
+
+WeedModFE2 <- fixef(Weed_FullNitrogen)
+fun.1FullTest<-function(x) WeedModFE2[1]*(1/(1+(WeedModFE2[4]*x)))
+fun.2FullTest<-function(x) WeedModFE2[2]*(1/(1+(WeedModFE2[5]*x)))
+fun.3FullTest<-function(x) WeedModFE2[3]*(1/(1+(WeedModFE2[6]*x)))
+
+#pdf("Fig2Mod.pdf", width=5.82, height=5.54)
+ggplot(SR_weedsBiomass3,
+       aes(x=Soy_num_metric,y=TotalBiomass_metric,color=as.factor(NitrogenMetric)))+
+    geom_point()+
+    stat_function(fun=fun.1FullTest,size=1.2,aes(color="0"))+
+    stat_function(fun=fun.2FullTest,size=1.2,aes(color="70"))+
+    stat_function(fun=fun.3FullTest,size=1.2,aes(color="135"))+
+    theme_bw(base_size = 18)+
+    ylab(expression("Weed biomass (kg"~ha^-1*')'))+
+    xlab(expression("Soybean density (plants"~ha^-1*')'))+
+    labs(color=expression("Nitrogen (kg"~ha^-1*')'))+
+    scale_y_continuous(labels = scales::comma)+
+    scale_x_continuous(labels = scales::comma)+
+    scale_color_brewer(palette = "Accent",labels = c("0", "63", "125"))+
+    theme(plot.title = element_text(hjust = 0.5), 
+          legend.position = "bottom")
+#dev.off()
+
+```
+
+##System
+I had to switch transform = response to type = response in emmeans to get things to run Fig results did not change (3/1/23). But its possible that's because letters were manually input (back from when transform = response worked). 
+```{r Annual vs. Perennial, eval=FALSE, include=FALSE}
+SR_weedsLong
+SR_weedsKey
+SR_weedsLong$Species<-gsub("\\."," ",SR_weedsLong$Species)
+SR_weedsLong$Species<-dplyr::recode(SR_weedsLong$Species,"Tree spp "="Tree spp.")
+
+SR_weedsJoined<-left_join(SR_weedsLong,SR_weedsKey,by = c("Species" = "Common.Name"))
+SR_weedsJoinedNoNA<-SR_weedsJoined[-which(is.na(SR_weedsJoined$LifeCycle)),]
+
+SR_weedsBiomass_Joined<-
+  as.data.frame(
+  SR_weedsJoinedNoNA %>%
+    group_by(Site,Block,Plot,Treatment,Seeding,LifeCycle,Habit) %>%
+    dplyr::select(-Species) %>% 
+    summarise(TotalBiomass=sum(Biomass)) %>% 
+    mutate(Mean_lbs..ac=TotalBiomass*((.5/0.000123553)*.0022),
+           WeedBiomass_kgha=(TotalBiomass/.5)*10,
+           NitrogenMetric=
+             case_when(Treatment=="Low"~70,
+                       Treatment=="High"~135,
+                       TRUE~0))%>% 
+    dplyr::rename("Nitrogen"="Treatment"))
+
+SR_weedsBiomass_Joined[c("Site","Block","Nitrogen","Seeding","LifeCycle","Habit")]<-
+  lapply(SR_weedsBiomass_Joined[c("Site","Block","Nitrogen","Seeding","LifeCycle","Habit")], factor)
+
+SR_weedsBiomass_Joined$Nitrogen<-
+  factor(SR_weedsBiomass_Joined$Nitrogen,
+         levels=c("None","Low","High"),
+         labels = c("0","60","120"))
+SR_weedsBiomass_Joined$Habit<-
+  factor(SR_weedsBiomass_Joined$Habit,
+         levels=c("BL","G"),
+         labels = c("Broadleaf","Grass"))
+SR_weedsBiomass_Joined$NitrogenMetric<-as.factor(SR_weedsBiomass_Joined$NitrogenMetric)
+
+SysWeedBiomass<-SR_weedsBiomass_Joined
+str(SysWeedBiomass)
+SysWeedBiomass$Site<-factor(SysWeedBiomass$Site,levels = c("Aur","Gen"),labels = c("Aurora","Geneva"))
+SysWeedBiomass$Seeding<-as.numeric(as.character(SysWeedBiomass$Seeding))
+
+#Avg, perennial weed biomass in the control! For dissertation!
+SR_weedsBiomass_Joined %>% 
+  filter(Nitrogen == 0 & Seeding == 0 & LifeCycle == "Perennial") %>% 
+  group_by(Site,LifeCycle,Block,Plot) %>% 
+  summarise(WeedBio2=sum(WeedBiomass_kgha,na.rm=T)) %>% 
+  ungroup() %>% 
+  summarise(Mean=mean(WeedBio2,na.rm=T))
+
+SR_weedsBiomass_Joined2<-SR_weedsBiomass_Joined
+SR_weedsBiomass_Joined2$Site<-factor(SR_weedsBiomass_Joined2$Site,
+                                     levels = c("Aur","Gen"),
+                                     labels = c("Aurora","Geneva"))
+library(plotrix)
+Vect<-SR_weedsBiomass_Joined2 %>%
+  filter(!Seeding==0) %>% 
+  group_by(Site,LifeCycle,NitrogenMetric) %>% 
+  summarise(MaxBar=mean(WeedBiomass_kgha,na.rm=T)+
+              std.error(WeedBiomass_kgha,na.rm=T))
+
+#tiff("Fig3_Dissertation.tiff", units="in", width=7.81, height=3.55, res=300)
+ggplot(SR_weedsBiomass_Joined2[!SR_weedsBiomass_Joined2$Seeding==0,],
+       aes(LifeCycle,WeedBiomass_kgha,fill=NitrogenMetric))+
+  stat_summary(geom = "bar",fun="mean",na.rm=TRUE,position = "dodge")+
+  stat_summary(geom = "errorbar",fun.data = "mean_se",na.rm = TRUE,
+               width=.1,position = position_dodge(.9))+
+  geom_text(data=Vect,aes(x=LifeCycle,y=MaxBar),
+            label=c("a","b","b","a","a","b",
+                    "a","a","b","a","a","a"),
+            position = position_dodge(.9),
+            vjust=-.45,size=4.5)+
+  coord_cartesian(ylim=c(0,1200))+
+  labs(fill = expression("Nitrogen (kg"~ha^-1*')'))+
+  theme_bw(base_size = 16)+
+  scale_fill_grey(start = 0.8, end = 0.4,labels = c("0", "63", "125"))+
+  scale_y_continuous(labels = scales::comma)+
+  theme(legend.position = "right")+
+  xlab("Weed lifecycle")+
+  ylab(expression("Weed biomass (kg"~ha^-1*')'))+
+  facet_wrap(~Site)
+#dev.off()
+
+SR_weedsBiomass_Joined2$Block<-as.numeric(as.character(SR_weedsBiomass_Joined2$Block))
+
+SR_weedsBiomass_Joined3<-SR_weedsBiomass_Joined2 %>% 
+  group_by(Site,Block,Plot,Seeding, NitrogenMetric,LifeCycle) %>% 
+  summarise(WeedBiomass_kgha=sum(WeedBiomass_kgha)) %>% 
+  mutate(Block=case_when(
+    Site=="Geneva"~Block+4,
+    TRUE~Block
+  ))
+SR_weedsBiomass_Joined2$Block<-as.factor(SR_weedsBiomass_Joined2$Block)
+SR_weedsBiomass_Joined3$Block<-as.factor(SR_weedsBiomass_Joined3$Block)
+SR_weedsBiomass_Joined3 %>% 
+  filter(LifeCycle=="Perennial"&WeedBiomass_kgha=="0")
+
+#WITH INT linear model supplementation 
+AnnualBiomassAur<-lmer(sqrt(WeedBiomass_kgha)~Seeding*NitrogenMetric+
+                      (1|Block/Seeding),
+     data = SR_weedsBiomass_Joined3[SR_weedsBiomass_Joined3$LifeCycle=="Annual"&
+                                    SR_weedsBiomass_Joined3$Site=="Aurora"&
+                                    !SR_weedsBiomass_Joined3$Seeding==0,])
+plot(AnnualBiomassAur)
+anova(AnnualBiomassAur)
+multcomp::cld(emmeans(AnnualBiomassAur,specs = ~NitrogenMetric, type = "response"),
+            sort=F,adjust="none",Letters="abcd")
+
+AnnualBiomassGen<-lmer(sqrt(WeedBiomass_kgha)~Seeding*NitrogenMetric+
+                      (1|Block/Seeding),
+     data = SR_weedsBiomass_Joined3[SR_weedsBiomass_Joined3$LifeCycle=="Annual"&
+                                    SR_weedsBiomass_Joined3$Site=="Geneva"&
+                                    !SR_weedsBiomass_Joined3$Seeding==0,])
+plot(AnnualBiomassGen)
+anova(AnnualBiomassGen)
+multcomp::cld(emmeans(AnnualBiomassGen,specs = ~NitrogenMetric,type = "response"),
+            sort=F,adjust="none",Letters="abcd")
+
+PerennialBiomassAur<-lmer(sqrt(WeedBiomass_kgha)~Seeding*NitrogenMetric+
+                      (1|Block/Seeding),
+     data = SR_weedsBiomass_Joined3[SR_weedsBiomass_Joined3$LifeCycle=="Perennial"&
+                                    SR_weedsBiomass_Joined3$Site=="Aurora"&
+                                    !SR_weedsBiomass_Joined3$Seeding==0,])
+plot(PerennialBiomassAur)
+anova(PerennialBiomassAur)
+multcomp::cld(emmeans(PerennialBiomassAur,specs = ~NitrogenMetric,type = "response"),
+            sort=F,adjust="none",Letters="abcd")
+
+PerennialBiomassGen<-lmer(sqrt(WeedBiomass_kgha)~Seeding*NitrogenMetric+
+                      (1|Block/Seeding),
+     data = SR_weedsBiomass_Joined3[SR_weedsBiomass_Joined3$LifeCycle=="Perennial"&
+                                    SR_weedsBiomass_Joined3$Site=="Geneva"&
+                                    !SR_weedsBiomass_Joined3$Seeding==0,])
+plot(PerennialBiomassGen)
+anova(PerennialBiomassGen)
+multcomp::cld(emmeans(PerennialBiomassGen,specs = ~NitrogenMetric,type = "response"),
+            sort=F,adjust="none",Letters="abcd")
+
+library(glmmTMB)
+library(DHARMa)
+
+Tester<-lmer((WeedBiomass_kgha)~Site*Seeding*NitrogenMetric+(1|Site:Block),
+     data = SR_weedsBiomass_Joined3[SR_weedsBiomass_Joined3$LifeCycle=="Perennial",])
+Tester2<-glmmTMB(WeedBiomass_kgha~Site*Seeding*NitrogenMetric+(1|Site:Block),
+                 family = tweedie(),
+                 data = SR_weedsBiomass_Joined3[SR_weedsBiomass_Joined3$LifeCycle=="Perennial",])
+simulateResiduals(Tester2, plot = TRUE)
+car::Anova(Tester2,type=3)
+```
+
+##Community
+```{r PERMANOVA all, eval=FALSE, include=FALSE}
+SR_sp<-SR_weedsWide %>% dplyr::select(-c(Site,Block,Plot,Treatment,Seeding)) 
+SR_env<-SR_weedsWide %>% dplyr::select(Site,Block,Plot,Treatment,Seeding) 
+SR_env[c("Site","Block","Treatment","Seeding")]<-lapply(SR_env[c("Site","Block","Treatment","Seeding")], factor)
+SR_sp<-SR_sp[-c(72,110),]#this data was missing, I removed it
+SR_env<-SR_env[-c(72,110),]
+SR_sp[is.na(SR_sp)]<-0 #this data should have been 0, I corrected it
+any(is.na(SR_sp))
+
+nmds_SR<-metaMDS(SR_sp,try=50,trymax = 100)
+dimcheckMDS(SR_sp)
+stressplot(nmds_SR)
+
+op_SR <- ordiplot(nmds_SR, type = "n")
+cols <- c('#e66101','#5e3c99')
+points(nmds_SR, cex = 1, pch = 16, col = cols[SR_env$Site])
+ordispider(nmds_SR, groups = SR_env$Site,label = T)
+ordihull(nmds_SR, groups = SR_env$Site, lty = "dotted")
+
+#Sites had significantly different dispersion. This was also apparent when looking at the nmds of the weed data when grouped as a function of site.
+bd_SR.Site <- betadisper(vegdist(SR_sp, method = "bray"), SR_env$Site)
+boxplot(bd_SR.Site)
+anova(bd_SR.Site)
+permutest(bd_SR.Site)
+
+SR_sp0<-SR_weedsWide %>% 
+  filter(Seeding %in% c(75,150,225,300)) %>%
+  dplyr::select(-c(Site,Block,Plot,Treatment,Seeding)) 
+SR_env0<-SR_weedsWide %>% 
+  filter(Seeding %in% c(75,150,225,300)) %>% 
+  dplyr::select(Site,Block,Plot,Treatment,Seeding) 
+SR_env0[c("Site","Block","Treatment","Seeding")]<-
+  lapply(SR_env0[c("Site","Block","Treatment","Seeding")], factor)
+
+SR_sp0<-SR_sp0[-c(72,110),]#this data was missing, I removed it
+SR_env0<-SR_env0[-c(72,110),]
+SR_sp0[is.na(SR_sp0)]<-0 #this data should have been 0, I corrected it
+any(is.na(SR_sp0))
+
+bd_SR0.Site <- betadisper(vegdist(SR_sp0, method = "bray"), SR_env0$Site)
+boxplot(bd_SR0.Site)
+anova(bd_SR0.Site)
+permutest(bd_SR0.Site)
+```
+
+```{r PERMANOVA Aurora, eval=FALSE, include=FALSE}
+SR_spAur<-SR_weedsWide %>% 
+  filter(Site=="Aur") %>% 
+  dplyr::select(-c(Site,Block,Plot,Treatment,Seeding)) 
+SR_envAur<-SR_weedsWide %>% 
+  filter(Site=="Aur") %>%
+  dplyr::select(Site,Block,Plot,Treatment,Seeding) 
+SR_envAur[c("Site","Block","Treatment","Seeding")]<-
+  lapply(SR_envAur[c("Site","Block","Treatment","Seeding")], factor)
+
+SR_spAur0<-SR_weedsWide %>% 
+  filter(Site=="Aur",Seeding %in% c(75,150,225,300)) %>%
+  dplyr::select(-c(Site,Block,Plot,Treatment,Seeding)) 
+SR_envAur0<-SR_weedsWide %>% 
+  filter(Site=="Aur",Seeding %in% c(75,150,225,300)) %>%
+  dplyr::select(Site,Block,Plot,Treatment,Seeding) 
+SR_envAur0[c("Site","Block","Treatment","Seeding")]<-
+  lapply(SR_envAur0[c("Site","Block","Treatment","Seeding")], factor)
+
+nmds_SR.Aur<-metaMDS(SR_spAur,try=50,trymax = 100,k=2)
+dimcheckMDS(SR_spAur)
+stressplot(nmds_SR.Aur)
+
+#Assumption testing: Nitrogen rate looks good
+#library(vegan3d)
+#nmds_SR.Aur3d<-metaMDS(SR_spAur,try=50,trymax = 100,k=3)
+#op_SR <- ordiplot3d(nmds_SR.Aur3d, type = "n")
+#cols <- c('#b35806','#e08214','#fdb863')
+#points(nmds_SR.Aur, cex = 1, pch = 16, col = cols[SR_envAur$Treatment])
+#ordispider(nmds_SR.Aur, groups = SR_envAur$Treatment,label = T)
+#ordihull(nmds_SR.Aur, groups = SR_envAur$Treatment, lty = "dotted")
+
+#non-zero rates- perfect
+bd_SR_Aur_Treatment <- betadisper(vegdist(SR_spAur0, method = "bray"), SR_envAur0$Treatment)
+boxplot(bd_SR_Aur_Treatment)
+anova(bd_SR_Aur_Treatment)
+permutest(bd_SR_Aur_Treatment)
+
+##Assumption testing: Seeding rate looks good
+#All five seeding rates
+#op_SR <- ordiplot(nmds_SR.Aur, type = "n")
+#cols <- c('#b35806','#e08214','#fdb863')
+#points(nmds_SR.Aur, cex = 1, pch = 16, col = cols[SR_envAur$Seeding])
+#ordispider(nmds_SR.Aur, groups = SR_envAur$Seeding,label = T)
+#ordihull(nmds_SR.Aur, groups = SR_envAur$Seeding, lty = "dotted")
+
+#bd_SR_Aur_Seeding <- betadisper(vegdist(SR_spAur, method = "bray"), SR_envAur$Seeding)
+#boxplot(bd_SR_Aur_Seeding)
+#anova(bd_SR_Aur_Seeding)
+#permutest(bd_SR_Aur_Seeding)
+
+#non-zero rates- perfect
+bd_SR_Aur_Seeding0 <- betadisper(vegdist(SR_spAur0, method = "bray"), SR_envAur0$Seeding)
+boxplot(bd_SR_Aur_Seeding0)
+anova(bd_SR_Aur_Seeding0)
+permutest(bd_SR_Aur_Seeding0)
+
+#library(vegan3d)
+#library(rgl)
+
+#ordirgl(nmds_SR.Aur3d,groups = SR_envAur$Seeding,col = SR_envAur$Seeding)
+#orglspider (nmds_SR.Aur3d, groups = SR_envAur$Seeding,label = T)
+#orglellipse (nmds_SR.Aur3d, groups = SR_envAur$Seeding,col = SR_envAur$Seeding)
+#movie3d(spin3d(axis = c(0, .5, .5)), 
+        #duration = 3,
+        #dir = getwd())
+
+####PERMANOVA####
+PermSetAur<- how(within = Within(type = "free"),
+         plots = Plots(strata = interaction(SR_envAur0$Block,SR_envAur0$Seeding), 
+                       type = "free"),
+         blocks = SR_envAur0$Block,nperm=999)
+
+pmv_SR_Aur_BreyCurtis <- adonis2(
+  SR_spAur ~ Seeding*Treatment, data = SR_envAur)
+pmv_SR_Aur_BreyCurtis
+
+pmv_SR_Aur_BreyCurtis0b <- adonis2(
+  SR_spAur0 ~ Seeding*Treatment, data = SR_envAur0,permutations = PermSetAur)
+pmv_SR_Aur_BreyCurtis0b
+```
+
+```{r PERMANOVA Geneva, eval=FALSE, include=FALSE}
+SR_spGen<-SR_weedsWide %>%
+  filter(Site=="Gen") %>%
+  dplyr::select(-c(Site,Block,Plot,Treatment,Seeding)) 
+
+SR_envGen<-SR_weedsWide %>%
+  filter(Site=="Gen") %>%
+  dplyr::select(Site,Block,Plot,Treatment,Seeding) 
+SR_envGen[c("Site","Block","Treatment","Seeding")]<-lapply(SR_envGen[c("Site","Block","Treatment","Seeding")], factor)
+
+SR_spGen<-SR_spGen[-c(12,50),]
+SR_envGen<-SR_envGen[-c(12,50),]
+SR_spGen[is.na(SR_spGen)]<-0 #this data should have been 0, I corrected it
+any(is.na(SR_spGen))
+
+#imputed
+SR_weedsWide2<-SR_weedsWide
+SR_weedsWide2[c(72,110),]
+SR_weedsWide2[72,6:56]<-SR_weedsWide %>% 
+  filter(Site=="Gen"&Treatment=="High"&Seeding==225) %>% 
+  summarise_at(6:56,mean,na.rm=T)
+
+SR_weedsWide2[110,6:56]<-SR_weedsWide %>% 
+  filter(Site=="Gen"&Treatment=="High"&Seeding==300) %>% 
+  summarise_at(6:56,mean,na.rm=T)
+
+#Excluding zero AND imputed (12/29/20)
+SR_spGen0<-SR_weedsWide2 %>% 
+  filter(Site=="Gen",Seeding %in% c(75,150,225,300)) %>% 
+  dplyr::select(-c(Site,Block,Plot,Treatment,Seeding)) 
+
+SR_envGen0<-SR_weedsWide2 %>% 
+  filter(Site=="Gen",Seeding %in% c(75,150,225,300)) %>%
+  dplyr::select(Site,Block,Plot,Treatment,Seeding) 
+SR_envGen0[c("Site","Block","Treatment","Seeding")]<-lapply(SR_envGen0[c("Site","Block","Treatment","Seeding")], factor)
+
+#SR_spGen0<-SR_spGen0[-c(12,41),] #not nessary with imputed data
+#SR_envGen0<-SR_envGen0[-c(12,41),] #not nessary with imputed data
+SR_spGen0[is.na(SR_spGen0)]<-0 #this data should have been 0, I corrected it
+any(is.na(SR_spGen0))
+
+
+nmds_SR.Gen<-metaMDS(SR_spGen0,try=50,trymax = 100,k=2)
+dimcheckMDS(SR_spGen0)
+stressplot(nmds_SR.Gen)
+
+#Assumption testing: Nitrogen rate looks good, especially without zero seeding rate
+op_SR <- ordiplot(nmds_SR.Gen, type = "n")
+cols <- c('#b35806','#e08214','#fdb863')
+points(nmds_SR.Gen, cex = 1, pch = 16, col = cols[SR_envGen0$Treatment])
+ordispider(nmds_SR.Gen, groups = SR_envGen0$Treatment,label = T)
+ordihull(nmds_SR.Gen, groups = SR_envGen0$Treatment, lty = "dotted")
+
+bd_SR_Gen_Treatment <- betadisper(vegdist(SR_spGen0, method = "bray"),
+                                  SR_envGen0$Treatment)
+boxplot(bd_SR_Gen_Treatment)
+anova(bd_SR_Gen_Treatment)
+permutest(bd_SR_Gen_Treatment)
+
+##Assumption testing: Seeding rate looks good
+#All five rates
+#op_SR <- ordiplot(nmds_SR.Gen, type = "n")
+#cols <- c('#b35806','#e08214','#fdb863')
+#points(nmds_SR.Gen, cex = 1, pch = 16, col = cols[SR_envGen$Seeding])
+#ordispider(nmds_SR.Gen, groups = SR_envGen$Seeding,label = T)
+#ordihull(nmds_SR.Gen, groups = SR_envGen$Seeding, lty = "dotted")
+
+#bd_SR_Gen_Seeding <- betadisper(vegdist(SR_spGen, method = "bray"), SR_envGen$Seeding)
+#boxplot(bd_SR_Gen_Seeding)
+#anova(bd_SR_Gen_Seeding)
+#permutest(bd_SR_Gen_Seeding)
+
+#Excluding the zero rate
+bd_SR_Gen_Seeding0 <- betadisper(vegdist(SR_spGen0, method = "bray"), SR_envGen0$Seeding)
+boxplot(bd_SR_Gen_Seeding0)
+anova(bd_SR_Gen_Seeding0)
+permutest(bd_SR_Gen_Seeding0)
+#ordirgl(nmds_SR.Gen,groups = SR_envGen$Treatment,col = SR_envGen$Treatment)
+#orglspider (nmds_SR.Gen, groups = SR_envGen$Treatment,label = T)
+#orglellipse (nmds_SR.Gen, groups = SR_envGen$Treatment,col = SR_envGen$Treatment)
+#movie3d(spin3d(axis = c(0, .5, .5)), 
+        #duration = 3,
+        #dir = getwd())
+
+####PERMANOVA####
+PermSetGen <- how(within = Within(type = "free"),
+         plots = Plots(strata = interaction(SR_envGen0$Block,SR_envGen0$Seeding), 
+                       type = "free"),
+         blocks = SR_envGen0$Block,nperm=999)
+
+pmv_SR_Gen_BreyCurtis <- adonis2(
+  SR_spGen ~ Seeding*Treatment, data = SR_envGen)
+pmv_SR_Gen_BreyCurtis
+
+pmv_SR_Gen_BreyCurtis0b <- adonis2(
+  SR_spGen0 ~ Seeding*Treatment, data = SR_envGen0,permutations = PermSetGen)
+pmv_SR_Gen_BreyCurtis0b
+```
+
+```{r Dominance, eval=FALSE, include=FALSE}
+#library(indicspecies)
+#IndiAur0_Nit<-multipatt(SR_spAur0,SR_envAur0$Treatment,duleg=TRUE,func="IndVal",
+ #                      control = how(nperm=99999))
+#IndiGen0_Nit<-multipatt(SR_spGen0,SR_envGen0$Treatment,duleg=TRUE,func="IndVal",
+ #                      control = how(nperm=99999))
+
+#summary(IndiAur0_Nit)
+#summary(IndiGen0_Nit)
+
+library(labdsv)
+#All data
+labdsv::importance(SR_spAur,SR_envAur$Treatment,typical = FALSE)
+labdsv::importance(SR_spGen,SR_envGen$Treatment,typical = FALSE)
+
+Aur_ImpTable<-read.xlsx(here("Data","WeedDominanceDataAll.xlsx"),sheet = 1)#Just the results of the importance function
+Gen_ImpTable<-read.xlsx(here("Data","WeedDominanceDataAll.xlsx"),sheet = 2)#Just the results of the importance function
+
+Aur_ImpTable<-Aur_ImpTable %>% 
+  pivot_longer(cols = c("High","Low","None"),names_to = "Nitrogen",values_to = "Total.Biomass") %>% 
+  group_by(Nitrogen) %>% 
+  arrange(Nitrogen,desc(Total.Biomass)) %>% 
+  mutate(cumulative_percentage=100*cumsum(Total.Biomass)/sum(Total.Biomass),
+         Site="Aurora") %>% 
+  filter(cumulative_percentage<=90)
+Aur_ImpTable$Species<-gsub("\\."," ",Aur_ImpTable$Species)
+
+Gen_ImpTable<-Gen_ImpTable %>% 
+  pivot_longer(cols = c("High","Low","None"),
+               names_to = "Nitrogen",values_to = "Total.Biomass") %>% 
+  group_by(Nitrogen) %>% 
+  arrange(Nitrogen,desc(Total.Biomass)) %>% 
+  mutate(cumulative_percentage=100*cumsum(Total.Biomass)/sum(Total.Biomass),
+         Site="Geneva") %>% 
+  filter(cumulative_percentage<=90)
+Gen_ImpTable$Species<-gsub("\\."," ",Gen_ImpTable$Species)
+
+Aur_ImpTable<-left_join(Aur_ImpTable,SR_weedsKey,by=c("Species"="Common.Name"))
+Gen_ImpTable<-left_join(Gen_ImpTable,SR_weedsKey,by=c("Species"="Common.Name"))
+
+ImpTable<-rbind(Aur_ImpTable,Gen_ImpTable)
+
+ImpTable<-ImpTable %>% 
+  mutate(WeedBiomass_kgha=Total.Biomass*20,
+         NitrogenMetric=
+           case_when(
+             Nitrogen=="None"~0,
+             Nitrogen=="Low"~63,
+             Nitrogen=="High"~125)) %>% 
+  dplyr::select(Site,NitrogenMetric,Scientific.name,LifeCycle,WeedBiomass_kgha,cumulative_percentage)
+
+#Importance excluding 0
+labdsv::importance(SR_spAur0,typical = FALSE,sort=TRUE)
+labdsv::importance(SR_spGen0,typical = FALSE)
+
+labdsv::importance(SR_spAur0,SR_envAur0$Treatment,typical = FALSE)
+labdsv::importance(SR_spGen0,SR_envGen0$Treatment,typical = FALSE)
+
+Aur0_ImpTable<-read.xlsx(here("Data", "WeedDominanceData.xlsx"),sheet = 1)#Just the results of the importance function
+Gen0_ImpTable<-read.xlsx(here("Data","WeedDominanceData.xlsx"),sheet = 2)#Just the results of the importance function
+
+Aur0_ImpTable<-Aur0_ImpTable %>% 
+  pivot_longer(cols = c("High","Low","None"),names_to = "Nitrogen",values_to = "Total.Biomass") %>% 
+  group_by(Nitrogen) %>% 
+  arrange(Nitrogen,desc(Total.Biomass)) %>% 
+  mutate(cumulative_percentage=100*cumsum(Total.Biomass)/sum(Total.Biomass),
+         Site="Aurora") %>% 
+  filter(cumulative_percentage<=90)
+Aur0_ImpTable$Species<-gsub("\\."," ",Aur0_ImpTable$Species)
+
+Gen0_ImpTable<-Gen0_ImpTable %>% 
+  pivot_longer(cols = c("High","Low","None"),
+               names_to = "Nitrogen",values_to = "Total.Biomass") %>% 
+  group_by(Nitrogen) %>% 
+  arrange(Nitrogen,desc(Total.Biomass)) %>% 
+  mutate(cumulative_percentage=100*cumsum(Total.Biomass)/sum(Total.Biomass),
+         Site="Geneva") %>% 
+  filter(cumulative_percentage<=90)
+Gen0_ImpTable$Species<-gsub("\\."," ",Gen0_ImpTable$Species)
+
+Aur0_ImpTable<-left_join(Aur0_ImpTable,SR_weedsKey,by=c("Species"="Common.Name"))
+Gen0_ImpTable<-left_join(Gen0_ImpTable,SR_weedsKey,by=c("Species"="Common.Name"))
+
+ImpTable<-rbind(Aur0_ImpTable,Gen0_ImpTable)
+
+ImpTable<-ImpTable %>% 
+  mutate(WeedBiomass_kgha=Total.Biomass*20,
+         NitrogenMetric=
+           case_when(
+             Nitrogen=="None"~0,
+             Nitrogen=="Low"~70,
+             Nitrogen=="High"~135)) %>% 
+  dplyr::select(Site,NitrogenMetric,Scientific.name,LifeCycle,WeedBiomass_kgha,cumulative_percentage)
+
+#Evenness
+SR_sp2<-SR_weedsWide2 %>% 
+  dplyr::select(-c(Site,Block,Plot,Treatment,Seeding))
+
+SR_env2<-SR_weedsWide2 %>% 
+  dplyr::select(Site,Block,Plot,Treatment,Seeding) 
+SR_env2[c("Site","Block","Treatment","Seeding")]<-lapply(SR_env2[c("Site","Block","Treatment","Seeding")], factor)
+
+#final cleaning
+SR_env2$Block<-as.numeric(as.character(SR_env2$Block))
+SR_env2<-SR_env2 %>% 
+  mutate(Block=case_when(
+    Site=="Gen" ~ Block+4,
+    TRUE~Block))
+SR_env2$Block<-as.factor(SR_env2$Block)
+
+SR_sp2[is.na(SR_sp2)]<-0  #corrected zeros
+any(is.na(SR_sp2))
+
+H<-diversity(SR_sp2)
+S <- specnumber(SR_sp2)
+J <- H/log(S)
+
+#NAs when 1 species,corrected from NA to 1
+c<-which(is.na(J))
+S[c]
+
+J<-replace_na(J,1)
+DiversityDataTmp<-as.data.frame(cbind(H,S,J))
+DiversityData<-cbind(SR_env2,DiversityDataTmp)
+str(DiversityData)
+
+DivMod<-lmer(J~Site*Treatment+(1|Block/Seeding),data=DiversityData)
+plot(DivMod)
+anova(DivMod)
+pairs(emmeans(DivMod,~Treatment|Site))
+```
+
+#Budget
+```{r money modeling}
+YieldData6<-YieldData5
+YieldData6<-YieldData6 %>% 
+  mutate(SeedingMetric=Seeding*1000*2.47,
+         NitCostMetric=as.numeric(as.character(NitrogenMetric))*20.35610978,
+         SeedCostMetric=SeedingMetric*0.000321429,
+         IncomeMetric=SeedWeight_kgha*0.685837984,
+         Profit_dollarsha=IncomeMetric-(SeedCostMetric))
+
+YieldData6$SeedingMetric<-as.numeric(as.character(YieldData6$SeedingMetric))
+
+ProfitRed<-nlme(Profit_dollarsha~-a*SeedingMetric^2+b*SeedingMetric,
+     data=YieldData6,
+     start=c(9.813e-07,1.080e-01),
+     fixed= list(a~1,b ~ 1),
+     random = list(Site=pdDiag(list(a~1,b ~ 1)),
+                   Block=pdDiag(list(a~1,b ~ 1))),
+     na.action = na.omit)
+
+#Site
+ProfitSite<-nlme(Profit_dollarsha~-a*SeedingMetric^2+b*SeedingMetric,
+     data=YieldData6,
+     start=c(9.813e-07,9.813e-07,1.080e-01,1.080e-01),
+     fixed= list(a~Site,b ~ Site),
+     random = list(Site=pdDiag(list(a~Site,b ~ Site)),
+                   Block=pdDiag(list(a~Site,b ~ Site))),
+     na.action = na.omit)
+
+anova(ProfitRed,ProfitSite)
+#Nitrogen
+ProfitNitrogen<-nlme(Profit_dollarsha~-a*SeedingMetric^2+b*SeedingMetric,
+     data=YieldData6,
+     start=c(9.813e-07,9.813e-07,9.813e-07,1.080e-01,1.080e-01,1.080e-01),
+     fixed= list(a~Nitrogen,b ~ Nitrogen),
+     random = list(Nitrogen=pdDiag(list(a~Nitrogen,b ~ Nitrogen)),
+                   Block=pdDiag(list(a~Nitrogen,b ~ Nitrogen))),
+     na.action = na.omit)
+anova(ProfitRed,ProfitNitrogen)
+
+fixef(ProfitRed)
+fixef(ProfitSite)
+fixef(ProfitNitrogen)
+
+#profit ploy
+fun.1Profit <- function(x) -fixef(ProfitRed)[1]*x^2+fixef(ProfitRed)[2]*x  
+optimize(fun.1Profit, interval=c(0,741300),maximum = T)
+
+#tiff("Fig5.tiff", units="in", width=5.82, height=5.54, res=300)
+ggplot(YieldData6,aes(x=SeedingMetric,y=Profit_dollarsha))+
+  geom_point()+
+  stat_function(fun=fun.1Profit,size=1.2)+
+  geom_segment(aes(x = 527800.3, y = 0, xend = 527800.3, yend = 2237.864),
+               size=.3,arrow = arrow(length = unit(0.3, "cm"),type = "closed"))+
+  scale_y_continuous(expand = c(0, 0),labels = scales::comma,limits=c(0,4000)) +
+  scale_x_continuous(labels = scales::comma,
+                     breaks=c(0,185300,370700,556000,741300))+
+  scale_color_brewer(palette = "Accent")+
+  theme_bw(base_size = 18)+
+   labs(y=expression("Partial returns (dollars"~ha^-1*')'),
+       x=expression("Seeding rate (seeds"~ha^-1*')'))+
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(hjust=1),
+        legend.position="none")
+#dev.off()
+#################
+```
