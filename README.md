@@ -11,3 +11,5 @@ Analysis and data for "[High seeding rates and low soil nitrogen environments op
 -  **Cash Crop**: Organic soybean (‘Viking 0.1518N,’ RM 1.5) was planted immediately after rye termination at five seeding rates (0–741,000 seeds ha⁻¹) using a JD 1755 planter.
 -  **Nitrogen Treatments**: Each seeding rate received 0, 63, or 125 kg N ha⁻¹ applied as sodium nitrate within 24 h of planting; no further fertilization or weeding occurred.
 -  **Measurements**: Rye biomass and soybean emergence were assessed post-planting and at V1 and R8 stages; weed biomass sampled at R6 (0.5 m<sup>2</sup> quadrat); soybean yield measured at R8 (1 m rowlength) after drying and adjusting to 13% moisture.
+
+Uploaded to Zenodo for long-term storage: [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.17857223.svg)](https://doi.org/10.5281/zenodo.17857223)
