@@ -2,6 +2,9 @@
 
 Analysis and data for "[High seeding rates and low soil nitrogen environments optimize weed suppression and profitability in organic no-till planted soybean](https://doi.org/10.3389/fagro.2021.678567)"
 
+**<ins>Objectives</ins>**
+To optimize the management of organic no-till soybeans through a study on seeding rates, nitrogen fertilization, weed suppression, yields, and profits.
+
 **<ins>Methods</ins>**
 -  **Sites & Conditions**: Experiments were conducted in Aurora and Geneva, NY (USDA zone 5b) on silt loam soils.
 -  **Cover Crop**: Aroostook cereal rye was seeded in September 2018 and terminated by roller-crimping in late May/early June 2019 at anthesis.
